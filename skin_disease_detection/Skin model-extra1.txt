@@ -1,0 +1,186 @@
+import pandas as pd
+import numpy as np
+from keras.models import Sequential
+from keras.layers import Dense, Conv2D, Dropout, Flatten, MaxPooling2D
+from keras.applications import MobileNetV2
+from keras.preprocessing.image import ImageDataGenerator
+from keras.callbacks import ReduceLROnPlateau
+from keras.optimizers import Adam
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.utils import compute_class_weight
+import matplotlib.pyplot as plt
+from google.colab import drive
+from sklearn.metrics import classification_report
+
+# Mount Google Drive
+drive.mount('/content/drive')
+
+# Constants
+IMG_SIZE = 224
+BATCH_SIZE = 32
+EPOCHS = 30
+
+# Load dataset
+data = pd.read_csv("/content/drive/MyDrive/Colab Notebooks/HAM10000_metadata.csv")
+data['image_full_name'] = data['image_id'] + '.jpg'
+
+# Splitting data
+X = data[['image_full_name', 'dx']]
+Y = X.pop('dx').to_frame()
+X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.17, random_state=42)
+X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.17, random_state=42)
+
+# Concatenate splits
+train = pd.concat([X_train, y_train], axis=1)
+val = pd.concat([X_val, y_val], axis=1)
+test = pd.concat([X_test, y_test], axis=1)
+
+# Label Encoding
+encoder = LabelEncoder()
+train['label'] = encoder.fit_transform(train['dx'])
+val['label'] = encoder.transform(val['dx'])
+test['label'] = encoder.transform(test['dx'])
+
+# Data Augmentation
+datagen = ImageDataGenerator(rescale=1./255,
+                             rotation_range=20,
+                             zoom_range=0.2,
+                             width_shift_range=0.2,
+                             height_shift_range=0.2,
+                             horizontal_flip=True,
+                             vertical_flip=True)
+
+# Balance the dataset
+max_samples = train['dx'].value_counts().max()
+balanced_data = []
+
+for class_index in train['label'].unique():
+    class_data = train[train['label'] == class_index]
+    num_to_augment = max_samples - len(class_data)
+    
+    if num_to_augment > 0:
+        augmented_data = datagen.flow_from_dataframe(dataframe=class_data, x_col="image_full_name", y_col=None,
+                                                     directory="/content/drive/MyDrive/Colab Notebooks/HAM10000_images",
+                                                     target_size=(IMG_SIZE, IMG_SIZE), batch_size=1, shuffle=False,
+                                                     save_to_dir=None)
+        
+        augmented_images = []
+        for _ in range(num_to_augment):
+            img, _ = next(augmented_data)
+            augmented_images.append(img[0])
+        
+        # Create new entries for augmented images
+        augmented_class_data = pd.DataFrame({
+            'image_full_name': ['augmented_img_' + str(i) + '.jpg' for i in range(num_to_augment)],
+            'dx': [class_data['dx'].iloc[0]] * num_to_augment,
+            'label': [class_index] * num_to_augment
+        })
+        
+        balanced_data.extend(class_data.values.tolist() + augmented_class_data.values.tolist())
+    else:
+        balanced_data.extend(class_data.values.tolist())
+
+# Convert balanced_data to DataFrame and shuffle
+balanced_data_df = pd.DataFrame(balanced_data, columns=train.columns)
+balanced_data_df = balanced_data_df.sample(frac=1).reset_index(drop=True)
+
+# Prepare the data generators for training, validation, and test sets
+train_data_generator = datagen.flow_from_dataframe(dataframe=balanced_data_df, x_col="image_full_name", y_col="dx",
+                                                   batch_size=BATCH_SIZE, directory="/content/drive/MyDrive/Colab Notebooks/HAM10000_images",
+                                                   shuffle=True, class_mode="categorical", target_size=(IMG_SIZE, IMG_SIZE))
+
+val_test_datagen = ImageDataGenerator(rescale=1./255)
+
+val_data = val_test_datagen.flow_from_dataframe(dataframe=val, x_col="image_full_name", y_col="dx",
+                                                directory="/content/drive/MyDrive/Colab Notebooks/HAM10000_images",
+                                                batch_size=BATCH_SIZE, shuffle=False, class_mode="categorical", target_size=(IMG_SIZE, IMG_SIZE))
+
+test_data = val_test_datagen.flow_from_dataframe(dataframe=test, x_col="image_full_name", y_col=None,
+                                                 directory="/content/drive/MyDrive/Colab Notebooks/HAM10000_images",
+                                                 shuffle=False, batch_size=1, class_mode=None, target_size=(IMG_SIZE, IMG_SIZE))
+
+# Compute class weights
+class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(train['label']), y=train['label'])
+class_weights_dict = dict(enumerate(class_weights))
+
+# Model Definition
+base_model = MobileNetV2(include_top=False, weights="imagenet", input_shape=(IMG_SIZE, IMG_SIZE, 3))
+
+model = Sequential()
+model.add(base_model)
+model.add(Conv2D(64, (3, 3), activation='relu'))
+model.add(MaxPooling2D(pool_size=(2, 2)))
+model.add(Dropout(0.40))
+model.add(Flatten())
+model.add(Dense(128, activation='relu'))
+model.add(Dropout(0.4))
+model.add(Dense(7, activation='softmax'))  # Use 'softmax' for multi-class classification
+
+# Model Compilation
+model.compile(optimizer=Adam(learning_rate=0.001), loss="categorical_crossentropy", metrics=["accuracy"])
+
+# Callbacks
+learning_control = ReduceLROnPlateau(monitor='val_accuracy', patience=3, verbose=1, factor=0.5, min_lr=0.0001)
+
+# Training the Model with Class Weights
+history = model.fit(x=train_data_generator,
+                    steps_per_epoch=train_data_generator.samples // train_data_generator.batch_size,
+                    validation_data=val_data,
+                    validation_steps=val_data.samples // val_data.batch_size,
+                    epochs=EPOCHS,
+                    verbose=1,
+                    class_weight=class_weights_dict,
+                    callbacks=[learning_control])
+
+# Save the model
+model.save('SkinModel.keras')
+
+# Plotting Accuracy and Loss
+plt.plot(history.history['accuracy'])
+plt.plot(history.history['val_accuracy'])
+plt.title('Model Accuracy')
+plt.ylabel('Accuracy')
+plt.xlabel('Epoch')
+plt.legend(['Train', 'Validation'], loc='upper left')
+plt.show()
+
+plt.plot(history.history['loss'])
+plt.plot(history.history['val_loss'])
+plt.title('Model Loss')
+plt.ylabel('Loss')
+plt.xlabel('Epoch')
+plt.legend(['Train', 'Validation'], loc='upper left')
+plt.show()
+
+N = EPOCHS
+plt.style.use("ggplot")
+plt.figure()
+plt.plot(np.arange(0, N), history.history["loss"], label="train_loss")
+plt.plot(np.arange(0, N), history.history["val_loss"], label="val_loss")
+plt.plot(np.arange(0, N), history.history["accuracy"], label="train_acc")
+plt.plot(np.arange(0, N), history.history["val_accuracy"], label="val_acc")
+plt.title("Training Loss and Accuracy")
+plt.xlabel("Epoch #")
+plt.ylabel("Loss/Accuracy")
+plt.legend(loc="lower left")
+plt.show()
+
+# Test Data Predictions
+test_data.reset()
+predictions = model.predict(test_data, steps=test_data.samples, verbose=1)
+y_pred = np.argmax(predictions, axis=1)
+
+# Compare Predictions with True Labels
+c = np.where(y_pred == test['label'].values)
+
+# Test Accuracy
+test_accuracy = (np.count_nonzero(c) / len(test['label'])) * 100
+print(f"Test Accuracy: {test_accuracy:.2f}%")
+
+# Classification Report
+report = classification_report(test['label'], y_pred, target_names=encoder.classes_)
+print(report)
+
+# Save the model again for safety
+model.save("final_skin_model.h5")

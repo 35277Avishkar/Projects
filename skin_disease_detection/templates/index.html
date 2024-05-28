@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload - Skin Disease Detection System</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<nav>
+        <div class="nav-left">Skin Disease Detection System</div>
+        <div class="nav-right">
+            <a href="/">Home</a>
+            <a href="/feedback">Feedback</a>
+            <a href="/logout">Logout</a>
+        </div>
+    </nav>
+<body>
+    
+    <div class="upload-container">
+        <h1>Upload an Image for Disease Prediction</h1>
+        <form action="/" method="POST" enctype="multipart/form-data">
+            <div class="input-group">
+                <label for="file">Upload Image</label>
+                <input type="file" id="file" name="file" accept="image/*" required>
+            </div>
+            <button type="submit">Upload</button>
+        </form>
+    </div>
+</body>
+</html>
